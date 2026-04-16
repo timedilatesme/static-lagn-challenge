@@ -254,7 +254,7 @@ def extract_lens_properties(lens_objects, all_bands=None, max_num_images=5,):
         table_dict["psx"].append(psx)
         table_dict["psy"].append(psy)
         table_dict["bh_mass_exp"].append(ps_class.source_dict.get("black_hole_mass_exponent", np.nan))
-        table_dict["edd_ratio"].append(10**(ps_class.source_dict.get("log_lambda_Edd", np.nan)))
+        table_dict["edd_ratio"].append(ps_class.source_dict.get("eddington_ratio", np.nan))
 
         # --- Time Delays & Mags ---
         arrival_times = lens_system.point_source_arrival_times()[source_index]
@@ -370,7 +370,12 @@ def extract_non_lens_properties(non_lens_objects, all_bands=None, has_central_ob
         # --- Central Object Properties Extraction ---
         if has_central_object:
             # treating the deflector as the central object, which is what FalsePositivePop do in slsim
-            table_dict["z_central"].append(lens_system.deflector_redshift)
+
+            def_z = lens_system.deflector_redshift
+            if isinstance(def_z, list) or isinstance(def_z, np.ndarray):
+                if len(def_z) > 1:
+                    def_z = def_z[0]
+            table_dict["z_central"].append(def_z)
 
             for band in all_bands:
                 mag = lens_system.deflector_magnitude(band=band)
@@ -383,4 +388,6 @@ def extract_non_lens_properties(non_lens_objects, all_bands=None, has_central_ob
                 table_dict[f"mag_lens_{band}"].append(np.nan)
 
     # Create astropy table
-    return Table(table_dict)
+    final_table =  Table(table_dict)
+
+    return final_table
