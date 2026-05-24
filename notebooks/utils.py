@@ -359,9 +359,9 @@ def extract_non_lens_properties(non_lens_objects, all_bands=None, has_central_ob
         # Format: D1_N000YYYYY where YYYYY is the index
         obj_id = f"D1_N000{i + starting_index:05d}"
         
-        # Randomly assign RA (0-360) and Dec (-90 to 90)
+        # Random RA and Dec in LSST footprint (RA: 0-360, Dec: -72 to +12)
         ra = np.random.uniform(0, 360)
-        dec = np.random.uniform(-90, 90)
+        dec = np.random.uniform(-72, 12)
 
         table_dict["Object ID"].append(obj_id)
         table_dict["RA"].append(ra)
@@ -370,7 +370,9 @@ def extract_non_lens_properties(non_lens_objects, all_bands=None, has_central_ob
         # --- Central Object Properties Extraction ---
         if has_central_object:
             # treating the deflector as the central object, which is what FalsePositivePop do in slsim
-            table_dict["z_central"].append(lens_system.deflector_redshift)
+            z = lens_system.deflector_redshift
+            val = z[0] if isinstance(z, (list, np.ndarray)) else z
+            table_dict["z_central"].append(val)
 
             for band in all_bands:
                 mag = lens_system.deflector_magnitude(band=band)
