@@ -1,0 +1,40 @@
+# ==============================================================================
+# DATA & HEAVY FILE OVERRIDES
+# ==============================================================================
+
+# Ignore all generated tables/catalogs
+*.fits
+*.csv
+*.parquet
+
+# Ignore compressed image and data archives
+*.zip
+*.tar.gz
+*.tgz
+
+# Ignore specific heavy data paths safely
+data/lenses/images/
+data/non-lenses/images/
+saved_objects/
+
+# ==============================================================================
+# PYTHON & JUPYTER SYSTEM FILES
+# ==============================================================================
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Virtual Environments (just in case you spin one up locally)
+.venv/
+venv/
+env/
+ENV/
+
+# OS-generated files
+.DS_Store
+Thumbs.db
