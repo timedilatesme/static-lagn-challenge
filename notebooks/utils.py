@@ -254,7 +254,7 @@ def extract_lens_properties(lens_objects, all_bands=None, max_num_images=5,):
         table_dict["psx"].append(psx)
         table_dict["psy"].append(psy)
         table_dict["bh_mass_exp"].append(ps_class.source_dict.get("black_hole_mass_exponent", np.nan))
-        table_dict["edd_ratio"].append(10**(ps_class.source_dict.get("log_lambda_Edd", np.nan)))
+        table_dict["edd_ratio"].append(ps_class.source_dict.get("eddington_ratio", np.nan))
 
         # --- Time Delays & Mags ---
         arrival_times = lens_system.point_source_arrival_times()[source_index]
