@@ -2,10 +2,10 @@
 # DATA & HEAVY FILE OVERRIDES
 # ==============================================================================
 
-# Ignore all generated tables/catalogs
+# Ignore large FITS files (but not the catalogs)
 *.fits
-*.csv
-*.parquet
+# *.csv
+# *.parquet
 
 # Ignore compressed image and data archives
 *.zip
