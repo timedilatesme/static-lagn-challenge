@@ -1,8 +1,16 @@
+# utils.py
+import os
+from astropy.io import fits
 import numpy as np
 import matplotlib.pyplot as plt
 from astropy.table import Table
 from slsim.ImageSimulation.image_simulation import simulate_image, rgb_image_from_image_list
 from tqdm import tqdm
+import lsst.geom as geom
+from lsst.daf.butler import Butler
+from slsim.LsstSciencePipeline import lsst_science_pipeline
+from slsim.Util.param_util import detect_object
+from astropy.visualization import make_lupton_rgb
 
 def make_multiband_images_and_rgb_image(
     lens_class,
@@ -386,3 +394,235 @@ def extract_non_lens_properties(non_lens_objects, all_bands=None, has_central_ob
 
     # Create astropy table
     return Table(table_dict)
+    
+
+def patch_is_crowded(coadd_list, variance_map_list, band_list, pixel_scale, num_pix,
+                      n_probes=20, snr_threshold=5, box_size_arcsec=3, crowd_frac=0.7):
+    """
+    Samples n_probes random locations in a freshly-fetched patch and checks how many
+    already contain a detectable source. If the occupied fraction exceeds crowd_frac,
+    the patch is too crowded to be worth a full batch injection attempt.
+    """
+    bbox = coadd_list[0].getBBox()
+    xmin, ymin = bbox.getBegin()
+    xmax, ymax = bbox.getEnd()
+    cutout_dim = (num_pix + 1) // 2
+    detect_band_idx = band_list.index('i') if 'i' in band_list else 0
+
+    occupied = 0
+    for _ in range(n_probes):
+        x_center = np.random.randint(xmin + cutout_dim, xmax - cutout_dim)
+        y_center = np.random.randint(ymin + cutout_dim, ymax - cutout_dim)
+        cutout_bbox = lsst_science_pipeline.generate_cutout_bbox(x_center, y_center, num_pix)
+        detect_img = coadd_list[detect_band_idx][cutout_bbox].image.array
+        detect_var = variance_map_list[detect_band_idx][cutout_bbox].array
+        if detect_object(detect_img, detect_var, pixel_scale=pixel_scale,
+                          box_size_arcsec=box_size_arcsec, snr_threshold=snr_threshold):
+            occupied += 1
+
+    return (occupied / n_probes) >= crowd_frac
+    
+# ====================================================================
+# --- Robust Injection Function ---
+# ====================================================================
+def robust_batch_lens_injection(
+    lens_batch, lens_ids, num_pix, coadd_list, coadd_nImage_list, mag_zero_list, 
+    variance_map_list, transform_matrix, band_list=['g', 'r', 'i', 'z', 'y'],
+    coadd_year=1, max_retries=50, snr_threshold=5, verbose=True
+):
+    """
+    Injects a batch of slsim lens objects into pre-loaded LSST DP0 images.
+
+    Parameters
+    ----------
+    lens_ids : list
+        External, guaranteed-unique identifiers aligned 1:1 with lens_batch
+        (use the object's row index in your catalog table/list). Do NOT rely
+        on lens.generate_id() for this - it's built from a handful of rounded
+        physical parameters and is not guaranteed unique, especially for a
+        "balanced" sample where many objects can share the same bin values.
+
+    Returns
+    -------
+    results_catalog : list of dict
+        Each dict's "row_id" field is the matching entry from lens_ids.
+    failures : dict
+        Maps row_id -> failure reason string ("no unoccupied location found"
+        or "exception in <band>: <msg>").
+    """
+    bbox = coadd_list[0].getBBox()
+    xmin, ymin = bbox.getBegin()
+    xmax, ymax = bbox.getEnd()
+    wcs = coadd_list[0].getWcs()
+    cutout_dim = (num_pix + 1) // 2
+
+    detect_band_idx = band_list.index('i') if 'i' in band_list else 0
+    pixel_scale = transform_matrix[0, 0] 
+
+    results_catalog = []
+    failures = {}
+
+    for current_lens, row_id in zip(lens_batch, lens_ids):
+        success = False
+        attempts = 0
+        last_exception = None
+
+        while not success and attempts < max_retries:
+            attempts += 1
+
+            x_center = np.random.randint(xmin + cutout_dim, xmax - cutout_dim)
+            y_center = np.random.randint(ymin + cutout_dim, ymax - cutout_dim)
+            cutout_bbox = lsst_science_pipeline.generate_cutout_bbox(x_center, y_center, num_pix)
+
+            detect_img = coadd_list[detect_band_idx][cutout_bbox].image.array
+            detect_var = variance_map_list[detect_band_idx][cutout_bbox].array
+
+            if detect_object(detect_img, detect_var, pixel_scale=pixel_scale, 
+                             box_size_arcsec=3, snr_threshold=snr_threshold):
+                continue  
+
+            injected_images, psf_kernels, noise_maps, dp0_cutouts = {}, {}, {}, {}
+            is_valid = True
+
+            for j, band in enumerate(band_list):
+                cutout_image = coadd_list[j][cutout_bbox]
+                cutout_nImage = coadd_nImage_list[j][cutout_bbox]
+                exposure_map = 30 * cutout_nImage.array
+
+                try:
+                    injected_array, psf_kernel, noise_map = lsst_science_pipeline.add_object(
+                        image_object=cutout_image,
+                        lens_class=current_lens,
+                        band=band,
+                        mag_zero_point=mag_zero_list[j],
+                        num_pix=num_pix,
+                        transform_pix2angle=transform_matrix,
+                        exposure_time=exposure_map,
+                        image_type="dp0",   
+                        coadd_year=coadd_year        
+                    )
+                    injected_images[band] = injected_array
+                    psf_kernels[band] = psf_kernel
+                    noise_maps[band] = noise_map
+                    dp0_cutouts[band] = cutout_image.image.array
+
+                except Exception as e:
+                    is_valid = False
+                    last_exception = (band, repr(e))
+                    break
+
+            if is_valid:
+                center_wcs = wcs.pixelToSky(geom.Point2D(x_center, y_center))
+                results_catalog.append({
+                    "row_id": row_id,
+                    "cutout_center": (center_wcs.getRa().asDegrees(), center_wcs.getDec().asDegrees()),
+                    "cutout_bbox": cutout_bbox,
+                    "injected_images": injected_images,
+                    "original_dp0_cutouts": dp0_cutouts,
+                    "psf_kernels": psf_kernels,
+                    "noise_maps": noise_maps
+                })
+                success = True
+
+        if not success:
+            if last_exception is not None:
+                band, msg = last_exception
+                reason = f"exception in {band}-band: {msg}"
+            else:
+                reason = "no unoccupied location found"
+            failures[row_id] = reason
+            if verbose:
+                print(f"Warning: Skipped row_id={row_id} (id={current_lens.generate_id()}) after {attempts} attempts ({reason}).")
+
+    return results_catalog, failures
+
+def plot_injected_montage(
+    id_list,
+    img_dir,
+    band_list=["g", "r", "i", "z", "y"],
+    rgb_bands=["i", "r", "g"],
+    rgb_stretch=0.5,
+    num_cols=10,
+    plot_title=None,
+):
+    """
+    Builds an RGB montage from previously saved, injected multi-band FITS cutouts
+    (as opposed to plot_montage, which simulates images from scratch).
+    """
+    all_rgb_images = []
+    for obj_id in id_list:
+        band_imgs = {}
+        for band in band_list:
+            fits_path = os.path.join(img_dir, f"{obj_id}_{band}.fits")
+            with fits.open(fits_path) as hdul:
+                band_imgs[band] = hdul[0].data
+        rgb = make_lupton_rgb(
+            band_imgs[rgb_bands[0]], band_imgs[rgb_bands[1]], band_imgs[rgb_bands[2]],
+            stretch=rgb_stretch,
+        )
+        all_rgb_images.append(rgb)
+
+    num_images = len(all_rgb_images)
+    num_rows = int(np.ceil(num_images / num_cols))
+    fig, axes = plt.subplots(num_rows, num_cols, figsize=(num_cols, num_rows))
+    for i, ax in enumerate(np.atleast_1d(axes).flat):
+        if i < num_images:
+            ax.imshow(all_rgb_images[i], origin="lower")
+            ax.axis("off")
+        else:
+            ax.remove()
+    if plot_title:
+        plt.suptitle(plot_title, fontsize=16)
+        plt.subplots_adjust(top=0.95)
+    fig.tight_layout()
+    return fig
+
+def plot_noise_std_histograms(
+    id_list,
+    img_dir,
+    band_list=["g", "r", "i", "z", "y"],
+    corner_size=9,
+    bins=30,
+    plot_title=None,
+):
+    """
+    Estimates per-image background noise from 9x9 patches taken at the four
+    corners of each cutout, then plots the per-band histograms of that noise
+    (one std value per image per band) overlaid on a single axis.
+    """
+    noise_by_band = {band: [] for band in band_list}
+
+    for obj_id in id_list:
+        for band in band_list:
+            fits_path = os.path.join(img_dir, f"{obj_id}_{band}.fits")
+            if not os.path.exists(fits_path):
+                continue
+            with fits.open(fits_path) as hdul:
+                img = hdul[0].data
+
+            c = corner_size
+            corners = np.concatenate([
+                img[:c, :c].ravel(),
+                img[:c, -c:].ravel(),
+                img[-c:, :c].ravel(),
+                img[-c:, -c:].ravel(),
+            ])
+            noise_by_band[band].append(np.std(corners))
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    for band in band_list:
+        values = np.array(noise_by_band[band])
+        if len(values) == 0:
+            continue
+        values = values[values <= .9]
+        ax.hist(values, bins=bins, histtype="step", linewidth=2, density=True, label=f"{band}-band")
+
+    ax.set_xlabel("Corner-patch noise std")
+    ax.set_ylabel("Density")
+    ax.legend()
+    if plot_title:
+        ax.set_title(plot_title)
+    fig.tight_layout()
+    return fig
+
+
